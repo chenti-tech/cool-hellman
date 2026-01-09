@@ -7,7 +7,7 @@ import {
   Loader, RotateCw, RotateCcw, Sun, FileSpreadsheet, Bell, TrendingUp, TrendingDown,
   ChevronLeft, ChevronRight, Save, Filter, Megaphone, BarChart3, Maximize2,
   Tag, X, Printer, Link as LinkIcon, Siren, BookOpen, Info, Image as ImageIcon, Database,
-  CheckSquare, Square, Send
+  CheckSquare, Square, Send, LogIn
 } from 'lucide-react';
 import { initializeApp } from "firebase/app";
 import { 
@@ -16,12 +16,11 @@ import {
 } from "firebase/firestore";
 import { 
   getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken,
-  signInWithEmailAndPassword, signOut, sendSignInLinkToEmail, isSignInWithEmailLink, signInWithEmailLink
+  signInWithEmailAndPassword, signOut, GoogleAuthProvider, signInWithPopup
 } from "firebase/auth";
 import { 
   getStorage, ref, uploadString, getDownloadURL 
 } from "firebase/storage";
-
 
 // --- Firebase 初始化 ---
 
@@ -191,45 +190,19 @@ export default function App() {
   const [announcement, setAnnouncement] = useState(null); 
   const [notification, setNotification] = useState(null);
 
-  // 初始化 Auth 與 檢查連結登入
+  // 初始化 Auth
   useEffect(() => {
     if (!auth) return;
 
-    // 檢查是否為 Email 連結登入的回調
-    if (isSignInWithEmailLink(auth, window.location.href)) {
-        let email = window.localStorage.getItem('emailForSignIn');
-        if (!email) {
-            // 如果使用者在不同裝置點開，需要重新輸入 Email
-            email = window.prompt('請再次輸入您的 Email 以完成登入驗證：');
-        }
-        
-        if (email) {
-            signInWithEmailLink(auth, email, window.location.href)
-                .then(() => {
-                    window.localStorage.removeItem('emailForSignIn');
-                    // 清除 URL 中的參數，讓網址變乾淨
-                    window.history.replaceState({}, document.title, window.location.pathname);
-                    showNotification('驗證成功！正在登入...', 'success');
-                })
-                .catch((error) => {
-                    console.error("Email Link Auth Error:", error);
-                    showNotification('連結驗證失敗或已過期，請重新發送', 'error');
-                    setView('login');
-                });
-        }
-    } else {
-        // 如果不是連結回調，則檢查一般狀態 (或初始化 Custom Token)
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-             signInWithCustomToken(auth, __initial_auth_token);
-        }
-        // 注意：我們移除了 signInAnonymously，強制使用正式登入
+    // 檢查是否有 Custom Token (預覽環境用)，否則不自動登入，等待使用者操作
+    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+        signInWithCustomToken(auth, __initial_auth_token);
     }
 
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
       setUser(u);
       if (u) {
           // 登入後，檢查此 User 是否存在於我們的 users 集合中
-          // 這裡使用 query 查詢 email，不再需要下載所有 users
           if (u.email) {
               const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'users'), where('email', '==', u.email));
               try {
@@ -246,32 +219,31 @@ export default function App() {
 
                       setView('student');
                   } else {
-                      // 登入成功但找不到資料 -> 新用戶或未綁定資料 -> 引導至註冊頁面
-                      setView('profile-setup');
+                      // 管理員判斷 (簡單示例，實際建議用 Admin Claims 或固定 Email)
+                      if (u.email === 'admin@example.com') { // 請替換成您的管理員 Email 或保持原有機制
+                          // 如果是管理員，可能不需要建立 user profile
+                          // 但這裡我們先假設管理員也是透過 handleAdminLogin 進入，這裡主要處理 Google 登入的學生
+                           setView('profile-setup'); // 引導至註冊頁面 (就算是管理員 Email，若沒在資料庫也視為新用戶)
+                      } else {
+                           // 登入成功但找不到資料 -> 新用戶或未綁定資料 -> 引導至註冊頁面
+                           setView('profile-setup');
+                      }
                   }
               } catch (err) {
                   console.error("Fetch profile error", err);
-                  // 管理員登入(Email/PW)時可能沒有 email 欄位在 users 集合，這裡做個簡單判斷
-                  // 或是如果是 admin@example.com (假設的管理員)
-                  if(u.email === 'admin@example.com') { // 簡單範例，實際建議用 Admin Claims
-                     // Admin logic handled in handleLogin mostly, but for persistence:
-                     // 這裡為了簡化，若找不到且是 admin，可能需要特殊處理，或是 admin 也有 user doc
-                  }
               }
           } else {
-             // 可能是管理員登入或其他方式
+             // 匿名登入或其他無 Email 狀況 (不應發生在 Google Login)
              if (view === 'loading') setView('login');
           }
       } else {
-         if (view !== 'loading') setView('login');
-         else setView('login');
+         setView('login');
       }
     });
     return () => unsubscribe();
   }, []);
 
   // 監聽資料 (管理員用，或是學生讀取自己的資料)
-  // 注意：這裡如果為了資安，未來可以根據 currentProfile.role 決定要不要監聽 allUsers
   useEffect(() => {
     if (!user || !db) return;
 
@@ -285,7 +257,7 @@ export default function App() {
         });
     }
 
-    // 監聽 submissions (可以根據權限優化，目前維持全監聽以供範例)
+    // 監聽 submissions
     const subsQuery = query(collection(db, 'artifacts', appId, 'public', 'data', 'submissions'));
     const unsubSubs = onSnapshot(subsQuery, (snapshot) => {
       const subsList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
@@ -314,27 +286,19 @@ export default function App() {
     setTimeout(() => setNotification(null), 5000); 
   };
 
-  const handleSendLink = async (email) => {
-      if (!email) {
-          showNotification('請輸入 Email', 'error');
-          return;
-      }
-      
-      const actionCodeSettings = {
-          url: window.location.href, // 登入後導回當前頁面
-          handleCodeInApp: true,
-      };
-
-      try {
-          await sendSignInLinkToEmail(auth, email, actionCodeSettings);
-          window.localStorage.setItem('emailForSignIn', email); // 存起來供跳轉後驗證
-          showNotification('登入連結已寄出！請前往信箱點擊連結。', 'success');
-      } catch (error) {
-          console.error(error);
-          let msg = "發送失敗，請稍後再試";
-          if (error.code === 'auth/invalid-email') msg = "Email 格式不正確";
-          showNotification(msg, 'error');
-      }
+  const handleGoogleLogin = async () => {
+    const provider = new GoogleAuthProvider();
+    try {
+        await signInWithPopup(auth, provider);
+        showNotification('Google 登入成功！', 'success');
+        // onAuthStateChanged 會接手後續邏輯 (檢查資料庫等)
+    } catch (error) {
+        console.error("Google Login Error:", error);
+        let msg = "登入失敗，請稍後再試";
+        if (error.code === 'auth/popup-closed-by-user') msg = "登入已取消";
+        if (error.code === 'auth/operation-not-allowed') msg = "Google 登入未啟用：請至 Firebase Console 開啟";
+        showNotification(msg, 'error');
+    }
   };
 
   const handleCompleteProfile = async (profileData) => {
@@ -385,7 +349,7 @@ export default function App() {
     await signOut(auth);
     setCurrentProfile(null);
     setView('login');
-    setAllUsers([]); // 清空敏感資料
+    setAllUsers([]); 
   };
 
   if (view === 'loading') {
@@ -410,7 +374,7 @@ export default function App() {
         </div>
       )}
 
-      {view === 'login' && <LoginScreen onSendLink={handleSendLink} onAdminLogin={handleAdminLogin} announcement={announcement} />}
+      {view === 'login' && <LoginScreen onGoogleLogin={handleGoogleLogin} onAdminLogin={handleAdminLogin} announcement={announcement} />}
       
       {view === 'profile-setup' && <ProfileSetupScreen userEmail={user?.email} onSubmit={handleCompleteProfile} onLogout={handleLogout} />}
 
@@ -437,11 +401,10 @@ export default function App() {
   );
 }
 
-// --- 登入畫面 (改為 Email Link) ---
+// --- 登入畫面 (改為 Google Login) ---
 
-function LoginScreen({ onSendLink, onAdminLogin, announcement }) {
+function LoginScreen({ onGoogleLogin, onAdminLogin, announcement }) {
   const [role, setRole] = useState('student');
-  const [email, setEmail] = useState('');
   
   // Admin form
   const [adminCreds, setAdminCreds] = useState({ username: '', password: '' });
@@ -449,7 +412,7 @@ function LoginScreen({ onSendLink, onAdminLogin, announcement }) {
   const handleSubmit = (e) => {
     e.preventDefault();
     if (role === 'student') {
-        onSendLink(email);
+        onGoogleLogin();
     } else {
         onAdminLogin(adminCreds);
     }
@@ -492,36 +455,25 @@ function LoginScreen({ onSendLink, onAdminLogin, announcement }) {
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <div className="space-y-4">
           {role === 'student' ? (
             <>
-              <div className="text-center mb-4 p-4 bg-blue-50 rounded-lg border border-blue-100">
-                  <p className="text-sm text-blue-800 font-medium">使用 Email 無密碼登入</p>
-                  <p className="text-xs text-blue-600 mt-1">系統將發送一封驗證信給您，點擊信中連結即可登入。</p>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">電子信箱 (Email)</label>
-                <input 
-                  type="email" 
-                  required
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition"
-                  placeholder="請輸入您的 Email"
-                  value={email}
-                  onChange={e => setEmail(e.target.value)}
-                />
-              </div>
-              
-              <div className="mt-6">
-                <button 
-                  type="submit"
-                  className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-lg shadow transition duration-200 flex items-center justify-center gap-2"
-                >
-                  <Send size={18} /> 發送登入連結
-                </button>
+              <div className="text-center mb-6">
+                  <p className="text-gray-600 mb-4">歡迎！請使用您的 Google 帳號快速登入</p>
+                  <button 
+                    onClick={onGoogleLogin}
+                    className="w-full bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-bold py-3 rounded-lg shadow-sm transition duration-200 flex items-center justify-center gap-3"
+                  >
+                    <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-5 h-5" />
+                    使用 Google 帳號登入
+                  </button>
+                  <p className="text-xs text-gray-400 mt-4">
+                      若您是第一次登入，系統將會引導您填寫基本資料 (姓名、手機) 以完成註冊。
+                  </p>
               </div>
             </>
           ) : (
-            <>
+            <form onSubmit={handleSubmit} className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">管理員 Email</label>
                 <input 
@@ -551,9 +503,9 @@ function LoginScreen({ onSendLink, onAdminLogin, announcement }) {
                   登入系統
                 </button>
               </div>
-            </>
+            </form>
           )}
-        </form>
+        </div>
       </div>
     </div>
   );
@@ -582,7 +534,8 @@ function ProfileSetupScreen({ userEmail, onSubmit, onLogout }) {
                 <p className="text-gray-500 text-center mb-6">請補全您的基本資料以完成註冊</p>
                 
                 <div className="bg-blue-50 p-3 rounded-lg mb-6 text-sm text-blue-700 flex items-center gap-2">
-                    <Mail size={16} /> 已驗證信箱：<strong>{userEmail}</strong>
+                    <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-4 h-4" /> 
+                    已連結帳號：<strong>{userEmail}</strong>
                 </div>
 
                 <form onSubmit={handleSubmit} className="space-y-4">
