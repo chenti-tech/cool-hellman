@@ -61,7 +61,7 @@ const COURSE_SETTINGS = {
   maxEssays: 20,
   courseDurationDays: 200,
   maxScore: 25, // 系統全域最大值 (Chart用)
-  dbSizeLimitBytes: 1000000000 // 1GB Firebase 免費額度
+  dbSizeLimitBytes: 5000000000 // 5GB Cloud Storage 免費額度
 };
 
 // 作文主題分類
