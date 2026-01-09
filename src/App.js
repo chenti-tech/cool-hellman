@@ -7,7 +7,7 @@ import {
   Loader, RotateCw, RotateCcw, Sun, FileSpreadsheet, Bell, TrendingUp, TrendingDown,
   ChevronLeft, ChevronRight, Save, Filter, Megaphone, BarChart3, Maximize2,
   Tag, X, Printer, Link as LinkIcon, Siren, BookOpen, Info, Image as ImageIcon, Database,
-  CheckSquare, Square
+  CheckSquare, Square, Send
 } from 'lucide-react';
 import { initializeApp } from "firebase/app";
 import { 
@@ -16,12 +16,12 @@ import {
 } from "firebase/firestore";
 import { 
   getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken,
-  signInWithEmailAndPassword, signOut 
+  signInWithEmailAndPassword, signOut, sendSignInLinkToEmail, isSignInWithEmailLink, signInWithEmailLink
 } from "firebase/auth";
-// [新增] 引入 Firebase Storage 相關功能
 import { 
   getStorage, ref, uploadString, getDownloadURL 
 } from "firebase/storage";
+
 
 // --- Firebase 初始化 ---
 
@@ -42,12 +42,11 @@ const appId = "chenti-essay-system-v1";
 // 初始化 Firebase 實例
 let app, auth, db, storage;
 try {
-    // 簡單檢查是否有設定
     if (firebaseConfig && (firebaseConfig.apiKey || typeof __firebase_config !== 'undefined')) {
         app = initializeApp(firebaseConfig);
         auth = getAuth(app);
         db = getFirestore(app);
-        storage = getStorage(app); // [新增] 初始化 Storage
+        storage = getStorage(app);
     } else {
         console.warn("⚠️ 尚未填入 Firebase 設定");
     }
@@ -60,20 +59,18 @@ try {
 const COURSE_SETTINGS = {
   maxEssays: 20,
   courseDurationDays: 200,
-  maxScore: 25, // 系統全域最大值 (Chart用)
-  dbSizeLimitBytes: 5000000000 // 5GB Cloud Storage 免費額度
+  maxScore: 25,
+  dbSizeLimitBytes: 5000000000 // 5GB Cloud Storage
 };
 
-// 作文主題分類
 const ESSAY_TOPICS = ['知性題目', '感性題目'];
 
 // --- 工具函數 ---
 
-// 取得該題目的滿分標準
 const getMaxScore = (topic) => {
   if (topic === '知性題目') return 21;
   if (topic === '感性題目') return 25;
-  return 25; // 預設
+  return 25;
 };
 
 const formatDate = (dateString) => {
@@ -118,8 +115,6 @@ const loadScript = (src) => {
   });
 };
 
-// 圖片壓縮並轉 Base64 (畫質優化版)
-// [備註] 雖然改用 Storage，但為了預覽和傳輸速度，我們還是先在前端壓縮
 const compressImageToBase64 = (file, maxWidth = 1024, quality = 0.6) => { 
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -130,18 +125,15 @@ const compressImageToBase64 = (file, maxWidth = 1024, quality = 0.6) => {
       img.onload = () => {
         let width = img.width;
         let height = img.height;
-
         if (width > maxWidth) {
           height = Math.round((height * maxWidth) / width);
           width = maxWidth;
         }
-
         const canvas = document.createElement('canvas');
         canvas.width = width;
         canvas.height = height;
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, width, height);
-
         const base64 = canvas.toDataURL('image/jpeg', quality);
         resolve(base64);
       };
@@ -168,7 +160,6 @@ const formatBytes = (bytes, decimals = 2) => {
 
 // --- 通用元件 ---
 
-// 確認對話框元件 (取代 window.confirm)
 const ConfirmModal = ({ isOpen, message, onConfirm, onCancel }) => {
   if (!isOpen) return null;
   return (
@@ -200,56 +191,107 @@ export default function App() {
   const [announcement, setAnnouncement] = useState(null); 
   const [notification, setNotification] = useState(null);
 
+  // 初始化 Auth 與 檢查連結登入
   useEffect(() => {
     if (!auth) return;
 
-    const initAuth = async () => {
-      try {
+    // 檢查是否為 Email 連結登入的回調
+    if (isSignInWithEmailLink(auth, window.location.href)) {
+        let email = window.localStorage.getItem('emailForSignIn');
+        if (!email) {
+            // 如果使用者在不同裝置點開，需要重新輸入 Email
+            email = window.prompt('請再次輸入您的 Email 以完成登入驗證：');
+        }
+        
+        if (email) {
+            signInWithEmailLink(auth, email, window.location.href)
+                .then(() => {
+                    window.localStorage.removeItem('emailForSignIn');
+                    // 清除 URL 中的參數，讓網址變乾淨
+                    window.history.replaceState({}, document.title, window.location.pathname);
+                    showNotification('驗證成功！正在登入...', 'success');
+                })
+                .catch((error) => {
+                    console.error("Email Link Auth Error:", error);
+                    showNotification('連結驗證失敗或已過期，請重新發送', 'error');
+                    setView('login');
+                });
+        }
+    } else {
+        // 如果不是連結回調，則檢查一般狀態 (或初始化 Custom Token)
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
+             signInWithCustomToken(auth, __initial_auth_token);
         }
-      } catch (error) {
-        console.error("Auth Init Error:", error);
-        if (error.code === 'auth/operation-not-allowed') {
-             setTimeout(() => {
-                console.warn("系統警告：請至 Firebase Console > Authentication > Sign-in method 開啟 'Anonymous' (匿名) 登入功能。");
-             }, 1000);
-        }
-      }
-    };
-    initAuth();
-    
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
+        // 注意：我們移除了 signInAnonymously，強制使用正式登入
+    }
+
+    const unsubscribe = onAuthStateChanged(auth, async (u) => {
       setUser(u);
       if (u) {
-        if (view === 'loading') setView('login');
+          // 登入後，檢查此 User 是否存在於我們的 users 集合中
+          // 這裡使用 query 查詢 email，不再需要下載所有 users
+          if (u.email) {
+              const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'users'), where('email', '==', u.email));
+              try {
+                  const querySnapshot = await getDocs(q);
+                  if (!querySnapshot.empty) {
+                      const docData = querySnapshot.docs[0].data();
+                      // 找到了資料，設定為學生
+                      setCurrentProfile({ id: querySnapshot.docs[0].id, ...docData, role: 'student' });
+                      
+                      // 更新最後登入時間
+                      updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', querySnapshot.docs[0].id), {
+                          lastLoginAt: new Date().toISOString()
+                      });
+
+                      setView('student');
+                  } else {
+                      // 登入成功但找不到資料 -> 新用戶或未綁定資料 -> 引導至註冊頁面
+                      setView('profile-setup');
+                  }
+              } catch (err) {
+                  console.error("Fetch profile error", err);
+                  // 管理員登入(Email/PW)時可能沒有 email 欄位在 users 集合，這裡做個簡單判斷
+                  // 或是如果是 admin@example.com (假設的管理員)
+                  if(u.email === 'admin@example.com') { // 簡單範例，實際建議用 Admin Claims
+                     // Admin logic handled in handleLogin mostly, but for persistence:
+                     // 這裡為了簡化，若找不到且是 admin，可能需要特殊處理，或是 admin 也有 user doc
+                  }
+              }
+          } else {
+             // 可能是管理員登入或其他方式
+             if (view === 'loading') setView('login');
+          }
+      } else {
+         if (view !== 'loading') setView('login');
+         else setView('login');
       }
     });
     return () => unsubscribe();
   }, []);
 
+  // 監聽資料 (管理員用，或是學生讀取自己的資料)
+  // 注意：這裡如果為了資安，未來可以根據 currentProfile.role 決定要不要監聽 allUsers
   useEffect(() => {
     if (!user || !db) return;
 
-    const usersQuery = query(collection(db, 'artifacts', appId, 'public', 'data', 'users'));
-    const unsubUsers = onSnapshot(usersQuery, (snapshot) => {
-      const usersList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setAllUsers(usersList);
-      
-      if (currentProfile) {
-        const updatedMe = usersList.find(u => u.id === currentProfile.id);
-        if (updatedMe) setCurrentProfile(updatedMe);
-      }
-    }, (error) => console.error("Users sync error:", error));
+    // 只有管理員才需要監聽所有 users
+    let unsubUsers = () => {};
+    if (currentProfile?.role === 'admin') {
+        const usersQuery = query(collection(db, 'artifacts', appId, 'public', 'data', 'users'));
+        unsubUsers = onSnapshot(usersQuery, (snapshot) => {
+            const usersList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            setAllUsers(usersList);
+        });
+    }
 
+    // 監聽 submissions (可以根據權限優化，目前維持全監聽以供範例)
     const subsQuery = query(collection(db, 'artifacts', appId, 'public', 'data', 'submissions'));
     const unsubSubs = onSnapshot(subsQuery, (snapshot) => {
       const subsList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       subsList.sort((a, b) => new Date(b.date) - new Date(a.date));
       setAllSubmissions(subsList);
-    }, (error) => console.error("Submissions sync error:", error));
+    });
 
     const announcementDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'system_announcement', 'main');
     const unsubAnnounce = onSnapshot(announcementDocRef, (docSnap) => {
@@ -258,126 +300,93 @@ export default function App() {
       } else {
         setAnnouncement(null);
       }
-    }, (error) => console.error("Announcement sync error:", error));
+    });
 
     return () => {
       unsubUsers();
       unsubSubs();
       unsubAnnounce();
     };
-  }, [user, currentProfile?.id]);
+  }, [user, currentProfile]);
 
   const showNotification = (msg, type = 'info') => {
     setNotification({ msg, type });
     setTimeout(() => setNotification(null), 5000); 
   };
 
-  const handleLogin = async (role, credentials, action = 'login') => {
-    if (role === 'admin') {
+  const handleSendLink = async (email) => {
+      if (!email) {
+          showNotification('請輸入 Email', 'error');
+          return;
+      }
+      
+      const actionCodeSettings = {
+          url: window.location.href, // 登入後導回當前頁面
+          handleCodeInApp: true,
+      };
+
+      try {
+          await sendSignInLinkToEmail(auth, email, actionCodeSettings);
+          window.localStorage.setItem('emailForSignIn', email); // 存起來供跳轉後驗證
+          showNotification('登入連結已寄出！請前往信箱點擊連結。', 'success');
+      } catch (error) {
+          console.error(error);
+          let msg = "發送失敗，請稍後再試";
+          if (error.code === 'auth/invalid-email') msg = "Email 格式不正確";
+          showNotification(msg, 'error');
+      }
+  };
+
+  const handleCompleteProfile = async (profileData) => {
+      if (!user || !user.email) return;
+      
+      try {
+        const newUser = {
+            email: user.email, // 綁定 Email
+            name: profileData.name,
+            phone: profileData.phone,
+            startDate: new Date().toISOString(),
+            expiryDate: new Date(Date.now() + COURSE_SETTINGS.courseDurationDays * 24 * 60 * 60 * 1000).toISOString(),
+            isManualLocked: false,
+            role: 'student',
+            createdAt: new Date().toISOString(),
+            lastLoginAt: new Date().toISOString(),
+            tags: []
+        };
+        
+        const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'users'), newUser);
+        const userWithId = { id: docRef.id, ...newUser };
+        
+        setCurrentProfile(userWithId);
+        setView('student');
+        showNotification('註冊成功！歡迎加入', 'success');
+      } catch (err) {
+        console.error(err);
+        showNotification('註冊失敗，請稍後再試', 'error');
+      }
+  };
+
+  const handleAdminLogin = async (credentials) => {
       try {
         await signInWithEmailAndPassword(auth, credentials.username, credentials.password);
         setCurrentProfile({ role: 'admin', name: '管理員' });
         setView('admin');
         showNotification('管理員登入成功', 'success');
       } catch (error) {
-        console.error("Login Error:", error);
-        let errorMsg = "登入失敗";
-        if (error.code === 'auth/invalid-email') errorMsg = "Email 格式錯誤";
-        if (error.code === 'auth/user-not-found') errorMsg = "找不到此使用者";
-        if (error.code === 'auth/wrong-password') errorMsg = "密碼錯誤";
-        if (error.code === 'auth/too-many-requests') errorMsg = "登入嘗試次數過多，請稍後再試";
-        if (error.code === 'auth/operation-not-allowed') errorMsg = "錯誤：請至 Firebase Console > Authentication 開啟 'Email/Password' 登入功能";
-        
-        showNotification(errorMsg, 'error');
+          console.error("Login Error:", error);
+          let msg = "登入失敗";
+          if (error.code === 'auth/wrong-password') msg = "密碼錯誤";
+          if (error.code === 'auth/user-not-found') msg = "找不到此管理員帳號";
+          showNotification(msg, 'error');
       }
-    } else {
-      const inputPhone = (credentials.phone || '').trim();
-      const inputName = (credentials.name || '').trim();
-
-      if (!inputPhone || !inputName) {
-        showNotification('請輸入完整的姓名與手機號碼', 'error');
-        return;
-      }
-
-      const phoneRegex = /^09\d{8}$/;
-      if (!phoneRegex.test(inputPhone)) {
-        showNotification('手機號碼格式錯誤，請輸入 09 開頭的 10 碼數字', 'error');
-        return;
-      }
-
-      const foundUser = allUsers.find(u => (u.phone || '').trim() === inputPhone);
-      
-      if (action === 'login') {
-          if (foundUser) {
-            if ((foundUser.name || '').trim() === inputName) {
-              try {
-                 await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', foundUser.id), {
-                   lastLoginAt: new Date().toISOString()
-                 });
-              } catch(e) { console.error("Update login time error", e); }
-              
-              setCurrentProfile({ ...foundUser, role: 'student' });
-              setView('student');
-              showNotification('登入成功', 'success');
-            } else {
-              showNotification('姓名與手機號碼不符，請檢查', 'error');
-            }
-          } else {
-              showNotification('此手機號碼尚未註冊，請點選「新用戶註冊」', 'error');
-          }
-      } else if (action === 'register') {
-          if (foundUser) {
-              showNotification('此手機號碼已註冊，請直接點選「會員登入」', 'info');
-          } else {
-              const userByName = allUsers.find(u => (u.name || '').trim() === inputName);
-              if (userByName) {
-                  showNotification('此姓名已被其他手機註冊，請聯繫管理員', 'error');
-              } else {
-                  try {
-                    const newUser = {
-                      name: inputName,
-                      phone: inputPhone,
-                      startDate: new Date().toISOString(),
-                      expiryDate: new Date(Date.now() + COURSE_SETTINGS.courseDurationDays * 24 * 60 * 60 * 1000).toISOString(),
-                      isManualLocked: false,
-                      role: 'student',
-                      createdAt: new Date().toISOString(),
-                      lastLoginAt: new Date().toISOString(),
-                      tags: []
-                    };
-                    
-                    const docRef = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'users'), newUser);
-                    const userWithId = { id: docRef.id, ...newUser };
-                    
-                    setCurrentProfile(userWithId);
-                    setView('student');
-                    showNotification('註冊成功！歡迎加入', 'success');
-                  } catch (err) {
-                    console.error(err);
-                    showNotification('註冊失敗，請稍後再試', 'error');
-                  }
-              }
-          }
-      }
-    }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    await signOut(auth);
     setCurrentProfile(null);
     setView('login');
+    setAllUsers([]); // 清空敏感資料
   };
-
-  if (!auth) {
-      return (
-          <div className="flex h-screen items-center justify-center bg-gray-50 flex-col p-4 text-center">
-            <h1 className="text-2xl font-bold text-red-600 mb-4">尚未設定 Firebase</h1>
-            <p className="text-gray-700 mb-4">
-              如果您正在預覽環境，請稍候重整。<br/>
-              如果這是 Local 或 CodeSandbox，請填入 Config。
-            </p>
-          </div>
-      );
-  }
 
   if (view === 'loading') {
     return (
@@ -401,8 +410,10 @@ export default function App() {
         </div>
       )}
 
-      {view === 'login' && <LoginScreen onLogin={handleLogin} announcement={announcement} />}
+      {view === 'login' && <LoginScreen onSendLink={handleSendLink} onAdminLogin={handleAdminLogin} announcement={announcement} />}
       
+      {view === 'profile-setup' && <ProfileSetupScreen userEmail={user?.email} onSubmit={handleCompleteProfile} onLogout={handleLogout} />}
+
       {view === 'student' && currentProfile && (
         <StudentDashboard 
           user={currentProfile} 
@@ -426,16 +437,22 @@ export default function App() {
   );
 }
 
-// --- 登入畫面 ---
+// --- 登入畫面 (改為 Email Link) ---
 
-function LoginScreen({ onLogin, announcement }) {
+function LoginScreen({ onSendLink, onAdminLogin, announcement }) {
   const [role, setRole] = useState('student');
-  const [formData, setFormData] = useState({ name: '', phone: '', username: '', password: '' });
-  const [studentAction, setStudentAction] = useState('login'); 
+  const [email, setEmail] = useState('');
+  
+  // Admin form
+  const [adminCreds, setAdminCreds] = useState({ username: '', password: '' });
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    onLogin(role, formData, studentAction);
+    if (role === 'student') {
+        onSendLink(email);
+    } else {
+        onAdminLogin(adminCreds);
+    }
   };
 
   const showAnnouncement = announcement && announcement.visible && announcement.content && 
@@ -478,43 +495,28 @@ function LoginScreen({ onLogin, announcement }) {
         <form onSubmit={handleSubmit} className="space-y-4">
           {role === 'student' ? (
             <>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">真實姓名</label>
-                <input 
-                  type="text" 
-                  required
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition"
-                  placeholder="請輸入姓名"
-                  value={formData.name}
-                  onChange={e => setFormData({...formData, name: e.target.value})}
-                />
+              <div className="text-center mb-4 p-4 bg-blue-50 rounded-lg border border-blue-100">
+                  <p className="text-sm text-blue-800 font-medium">使用 Email 無密碼登入</p>
+                  <p className="text-xs text-blue-600 mt-1">系統將發送一封驗證信給您，點擊信中連結即可登入。</p>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">家長手機 (作為密碼)</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">電子信箱 (Email)</label>
                 <input 
-                  type="tel" 
+                  type="email" 
                   required
                   className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition"
-                  placeholder="0912345678"
-                  value={formData.phone}
-                  onChange={e => setFormData({...formData, phone: e.target.value})}
+                  placeholder="請輸入您的 Email"
+                  value={email}
+                  onChange={e => setEmail(e.target.value)}
                 />
               </div>
               
-              <div className="flex gap-3 mt-6">
+              <div className="mt-6">
                 <button 
                   type="submit"
-                  onClick={() => setStudentAction('register')}
-                  className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold py-3 rounded-lg shadow transition duration-200"
+                  className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-lg shadow transition duration-200 flex items-center justify-center gap-2"
                 >
-                  新用戶註冊
-                </button>
-                <button 
-                  type="submit"
-                  onClick={() => setStudentAction('login')}
-                  className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-lg shadow transition duration-200"
-                >
-                  會員登入
+                  <Send size={18} /> 發送登入連結
                 </button>
               </div>
             </>
@@ -526,8 +528,8 @@ function LoginScreen({ onLogin, announcement }) {
                   type="email" 
                   required
                   className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition"
-                  value={formData.username}
-                  onChange={e => setFormData({...formData, username: e.target.value})}
+                  value={adminCreds.username}
+                  onChange={e => setAdminCreds({...adminCreds, username: e.target.value})}
                   placeholder="admin@example.com"
                 />
               </div>
@@ -537,8 +539,8 @@ function LoginScreen({ onLogin, announcement }) {
                   type="password" 
                   required
                   className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition"
-                  value={formData.password}
-                  onChange={e => setFormData({...formData, password: e.target.value})}
+                  value={adminCreds.password}
+                  onChange={e => setAdminCreds({...adminCreds, password: e.target.value})}
                 />
               </div>
               <div className="mt-6">
@@ -555,6 +557,67 @@ function LoginScreen({ onLogin, announcement }) {
       </div>
     </div>
   );
+}
+
+// --- 新用戶資料補全畫面 ---
+
+function ProfileSetupScreen({ userEmail, onSubmit, onLogout }) {
+    const [name, setName] = useState('');
+    const [phone, setPhone] = useState('');
+
+    const handleSubmit = (e) => {
+        e.preventDefault();
+        if (!name || !phone) return;
+        if (!/^09\d{8}$/.test(phone)) {
+            alert('手機格式錯誤，請輸入 09 開頭的 10 碼數字');
+            return;
+        }
+        onSubmit({ name, phone });
+    };
+
+    return (
+        <div className="flex flex-col items-center justify-center min-h-screen bg-gray-50 p-4">
+            <div className="bg-white p-8 rounded-2xl shadow-lg w-full max-w-md border border-gray-200">
+                <h2 className="text-2xl font-bold text-gray-800 mb-2 text-center">歡迎加入！</h2>
+                <p className="text-gray-500 text-center mb-6">請補全您的基本資料以完成註冊</p>
+                
+                <div className="bg-blue-50 p-3 rounded-lg mb-6 text-sm text-blue-700 flex items-center gap-2">
+                    <Mail size={16} /> 已驗證信箱：<strong>{userEmail}</strong>
+                </div>
+
+                <form onSubmit={handleSubmit} className="space-y-4">
+                    <div>
+                        <label className="block text-sm font-bold text-gray-700 mb-1">真實姓名</label>
+                        <input 
+                            type="text" 
+                            required 
+                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                            placeholder="請輸入姓名"
+                            value={name}
+                            onChange={e => setName(e.target.value)}
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-bold text-gray-700 mb-1">手機號碼</label>
+                        <input 
+                            type="tel" 
+                            required 
+                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                            placeholder="0912345678"
+                            value={phone}
+                            onChange={e => setPhone(e.target.value)}
+                        />
+                    </div>
+                    <button type="submit" className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded-lg shadow mt-4 transition">
+                        完成註冊並進入系統
+                    </button>
+                </form>
+                <button onClick={onLogout} className="w-full text-gray-400 hover:text-gray-600 text-sm mt-4">
+                    取消並登出
+                </button>
+            </div>
+        </div>
+    );
 }
 
 // --- 學生後台 ---
@@ -835,7 +898,6 @@ function StudentDashboard({ user, submissions, announcement, onLogout, showNotif
     try {
       const compressedImages = await Promise.all(files.map(file => compressImageToBase64(file)));
       
-      // 改為上傳至 Storage
       const uploadedUrls = [];
       
       if (!storage) throw new Error("Firebase Storage 尚未啟用，請檢查設定。");
