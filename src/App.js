@@ -16,10 +16,11 @@ import {
 } from "firebase/firestore";
 import { 
   getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken,
-  signInWithEmailAndPassword, signOut, GoogleAuthProvider, signInWithPopup
+  signInWithEmailAndPassword, signOut, GoogleAuthProvider, signInWithPopup,
+  sendSignInLinkToEmail, isSignInWithEmailLink, signInWithEmailLink
 } from "firebase/auth";
 import { 
-  getStorage, ref, uploadString, getDownloadURL 
+  getStorage, ref, uploadString, getDownloadURL, deleteObject 
 } from "firebase/storage";
 
 // --- Firebase 初始化 ---
@@ -897,6 +898,20 @@ function StudentDashboard({ user, submissions, announcement, onLogout, showNotif
         message: '確定要收回這份作業嗎？收回後可以重新上傳。',
         onConfirm: async () => {
             try {
+              // 1. Delete images from Storage
+              if (storage) {
+                  const urls = sub.imageUrls || (sub.imageUrl ? [sub.imageUrl] : []);
+                  for (const url of urls) {
+                      try {
+                          const fileRef = ref(storage, url);
+                          await deleteObject(fileRef);
+                      } catch (e) {
+                          console.warn("Image delete failed (might be already deleted):", e);
+                      }
+                  }
+              }
+              
+              // 2. Delete document
               await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'submissions', sub.id));
               showNotification('已收回作業', 'info');
             } catch (err) {
@@ -1501,12 +1516,28 @@ function AdminDashboard({ users, submissions, announcement, onLogout, showNotifi
         message: '確定要刪除此學員資料嗎？這將會刪除該學員所有的繳交紀錄，此動作無法復原。',
         onConfirm: async () => {
             try {
-              await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', userId));
-              
+              // Get user submissions
               const userSubs = submissions.filter(s => s.studentId === userId);
+              
               for (const sub of userSubs) {
+                // 1. Delete images for this submission
+                if (storage) {
+                    const urls = sub.imageUrls || (sub.imageUrl ? [sub.imageUrl] : []);
+                    for (const url of urls) {
+                         try {
+                              const fileRef = ref(storage, url);
+                              await deleteObject(fileRef);
+                         } catch (e) {
+                              console.warn("Image delete failed:", e);
+                         }
+                    }
+                }
+                // 2. Delete submission doc
                 await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'submissions', sub.id));
               }
+
+              // 3. Delete user doc
+              await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', userId));
 
               setEditingUser(null);
               showNotification('學員資料已刪除', 'info');
@@ -1560,11 +1591,26 @@ function AdminDashboard({ users, submissions, announcement, onLogout, showNotifi
         try {
           const ids = Array.from(selectedUserIds);
           for (const uid of ids) {
-             await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', uid));
+             // Fetch subs for this user to delete images
              const userSubs = submissions.filter(s => s.studentId === uid);
              for (const sub of userSubs) {
+               // 1. Delete images
+               if (storage) {
+                  const urls = sub.imageUrls || (sub.imageUrl ? [sub.imageUrl] : []);
+                  for (const url of urls) {
+                       try {
+                            const fileRef = ref(storage, url);
+                            await deleteObject(fileRef);
+                       } catch (e) {
+                            console.warn("Image delete failed:", e);
+                       }
+                  }
+               }
+               // 2. Delete sub doc
                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'submissions', sub.id));
              }
+             // 3. Delete user doc
+             await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', uid));
           }
           setSelectedUserIds(new Set());
           showNotification(`已成功刪除 ${ids.length} 位學員`, 'success');
